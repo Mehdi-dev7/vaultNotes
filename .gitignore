@@ -1,0 +1,35 @@
+# Dépendances
+node_modules/
+
+# Build outputs
+out/
+dist/
+
+# Fichiers vault — NE JAMAIS commiter (données chiffrées personnelles)
+*.vlt
+*.vault
+
+# Icône générée (binaire lourd, se regénère depuis le PNG source)
+resources/icon.icns
+resources/icon.iconset/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Env (si ajouté plus tard)
+.env
+.env.*
