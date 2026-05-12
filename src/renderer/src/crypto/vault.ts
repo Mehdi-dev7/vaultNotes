@@ -81,6 +81,16 @@ export function decryptString(encrypted: string, key: Uint8Array): string {
   return new TextDecoder().decode(bytes)
 }
 
+/** Chiffre un Uint8Array brut (ex: masterKey) avec une clé AES-256-GCM. */
+export function encryptBytes(bytes: Uint8Array, key: Uint8Array): string {
+  return encryptRaw(bytes, key)
+}
+
+/** Déchiffre un Uint8Array brut chiffré avec encryptBytes. */
+export function decryptBytes(encrypted: string, key: Uint8Array): Uint8Array {
+  return decryptRaw(encrypted, key)
+}
+
 /** Convertit un VaultFile (lu sur disque) en forme sérialisable. */
 export function serializeVaultFile(file: VaultFile): string {
   return JSON.stringify(file, null, 2)

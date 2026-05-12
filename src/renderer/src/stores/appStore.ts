@@ -4,7 +4,8 @@ import { v4 as uuidv4 } from 'uuid'
 import { deriveKey, generateSalt, zeroFill } from '@/crypto/kdf'
 import {
   encryptVaultData, decryptVaultData, createVerifyToken, verifyToken,
-  encryptString, decryptString, serializeVaultFile, parseVaultFile,
+  encryptString, decryptString, encryptBytes, decryptBytes,
+  serializeVaultFile, parseVaultFile,
   uint8ToBase64, base64ToUint8,
 } from '@/crypto/vault'
 import { verifyTotp, generateTotpSecret, generateTotpQR } from '@/crypto/totp'
@@ -39,6 +40,9 @@ interface AppState {
   showSettings: boolean
   showTOTPSetup: boolean
 
+  // ── Recovery ──────────────────────────────────────────────────────────────
+  pendingRecoveryCode: string | null  // code affiché une seule fois après création
+
   // ── Opérations async ──────────────────────────────────────────────────────
   isLoading: boolean
 
@@ -62,6 +66,15 @@ interface AppState {
   verifyTotpSetup: (code: string, secret: string) => Promise<boolean>
   disableTotp: () => Promise<void>
 
+  /** Vérifie un code de récupération sans modifier l'état (validation UX). */
+  validateRecoveryCode: (code: string) => Promise<boolean>
+
+  /** Réinitialise le mot de passe via le code de récupération (après perte du mdp). */
+  resetPasswordViaRecovery: (recoveryCode: string, newPassword: string) => Promise<boolean>
+
+  /** Efface le code de récup affiché après création (utilisateur l'a sauvegardé). */
+  clearPendingRecoveryCode: () => void
+
   /** Export chiffré ChaCha20-Poly1305. */
   exportVault: (exportPassword: string) => Promise<void>
 
@@ -69,11 +82,12 @@ interface AppState {
   importVault: (importPassword: string) => Promise<boolean>
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
-  createProject: (name: string, icon?: string, color?: string) => Promise<Project>
+  createProject: (name: string, icon?: string, color?: string, templateCategories?: Array<{ name: string; icon: string; defaultNoteType?: NoteType }>) => Promise<Project>
   updateProject: (id: string, updates: Partial<Pick<Project, 'name' | 'icon' | 'color'>>) => Promise<void>
   deleteProject: (id: string) => Promise<void>
 
-  createCategory: (projectId: string, name: string, icon?: string) => Promise<Category>
+  createCategory: (projectId: string, name: string, icon?: string, defaultNoteType?: NoteType) => Promise<Category>
+  updateCategory: (projectId: string, categoryId: string, updates: Partial<Pick<Category, 'name' | 'icon'>>) => Promise<void>
   deleteCategory: (projectId: string, categoryId: string) => Promise<void>
 
   createNote: (projectId: string, categoryId: string, data: Omit<Note, 'id' | 'categoryId' | 'createdAt' | 'updatedAt'>) => Promise<Note>
@@ -94,6 +108,24 @@ interface AppState {
 }
 
 // ─── Helpers internes ─────────────────────────────────────────────────────────
+
+// Génère un code de récupération au format XXXX-XXXX-XXXX-XXXX-XXXX
+// Base32 Crockford (sans 0/O, 1/I/L) → ~99 bits d'entropie
+function generateRecoveryCode(): string {
+  const CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+  const bytes = crypto.getRandomValues(new Uint8Array(20))
+  let result = ''
+  for (let i = 0; i < 20; i++) {
+    if (i > 0 && i % 4 === 0) result += '-'
+    result += CHARS[bytes[i] % CHARS.length]
+  }
+  return result
+}
+
+// Normalise le code saisi par l'utilisateur (tirets, espaces, casse)
+function normalizeCode(code: string): string {
+  return code.toUpperCase().replace(/[-\s]/g, '')
+}
 
 async function persistVaultFile(file: VaultFile): Promise<void> {
   const result = await window.vault.writeVault(serializeVaultFile(file))
@@ -124,6 +156,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   showSettings: false,
   showTOTPSetup: false,
   isLoading: false,
+  pendingRecoveryCode: null,
 
   checkVaultExists: async () => {
     const result = await window.vault.vaultExists()
@@ -144,6 +177,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         totpEncryptedSecret = encryptString(totpSecret, key)
       }
 
+      // Génération du code de récupération
+      const recoveryCode = generateRecoveryCode()
+      const recoverySalt = generateSalt()
+      const recoveryKey = await deriveKey(normalizeCode(recoveryCode), recoverySalt)
+      const recoveryEncryptedCode = encryptString(recoveryCode, key)
+      const recoveryEncryptedMasterKey = encryptBytes(key, recoveryKey)
+      zeroFill(recoveryKey)
+
       const initialData: VaultData = {
         projects: [],
         createdAt: Date.now(),
@@ -157,6 +198,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         totpEnabled,
         totpEncryptedSecret,
         data: encryptVaultData(initialData, key),
+        recoverySalt: uint8ToBase64(recoverySalt),
+        recoveryEncryptedCode,
+        recoveryEncryptedMasterKey,
       }
 
       await persistVaultFile(vaultFile)
@@ -169,9 +213,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         vaultData: initialData,
         isTOTPEnabled: totpEnabled,
         isLoading: false,
+        pendingRecoveryCode: recoveryCode,
       })
 
-      return { totpSecret }
+      return { totpSecret, recoveryCode }
     } catch (e) {
       set({ isLoading: false })
       return { error: e instanceof Error ? e.message : 'Erreur inconnue' }
@@ -264,12 +309,29 @@ export const useAppStore = create<AppState>((set, get) => ({
         newTotpEncrypted = encryptString(secret, newKey)
       }
 
+      // Met à jour les données de recovery : re-chiffre la nouvelle masterKey
+      let newRecoverySalt = vaultFile.recoverySalt
+      let newRecoveryEncryptedCode = vaultFile.recoveryEncryptedCode
+      let newRecoveryEncryptedMasterKey = vaultFile.recoveryEncryptedMasterKey
+
+      if (vaultFile.recoverySalt && vaultFile.recoveryEncryptedCode) {
+        const recoveryCode = decryptString(vaultFile.recoveryEncryptedCode, masterKey)
+        const recoverySaltBytes = base64ToUint8(vaultFile.recoverySalt)
+        const recoveryKey = await deriveKey(normalizeCode(recoveryCode), recoverySaltBytes)
+        newRecoveryEncryptedMasterKey = encryptBytes(newKey, recoveryKey)
+        newRecoveryEncryptedCode = encryptString(recoveryCode, newKey)
+        zeroFill(recoveryKey)
+      }
+
       const newFile: VaultFile = {
         ...vaultFile,
         salt: uint8ToBase64(newSalt),
         verifyToken: createVerifyToken(newKey),
         totpEncryptedSecret: newTotpEncrypted,
         data: encryptVaultData(vaultData, newKey),
+        recoverySalt: newRecoverySalt,
+        recoveryEncryptedCode: newRecoveryEncryptedCode,
+        recoveryEncryptedMasterKey: newRecoveryEncryptedMasterKey,
       }
 
       await persistVaultFile(newFile)
@@ -311,6 +373,96 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ vaultFile: newFile, isTOTPEnabled: false })
   },
 
+  validateRecoveryCode: async (code) => {
+    try {
+      const readResult = await window.vault.readVault()
+      if (!readResult.ok) return false
+      const vaultFile = parseVaultFile(readResult.data)
+      if (!vaultFile.recoverySalt || !vaultFile.recoveryEncryptedMasterKey) return false
+
+      const recoverySalt = base64ToUint8(vaultFile.recoverySalt)
+      const recoveryKey = await deriveKey(normalizeCode(code), recoverySalt)
+      const masterKeyBytes = decryptBytes(vaultFile.recoveryEncryptedMasterKey, recoveryKey)
+      const valid = verifyToken(vaultFile.verifyToken, masterKeyBytes)
+      zeroFill(masterKeyBytes)
+      zeroFill(recoveryKey)
+      return valid
+    } catch {
+      return false
+    }
+  },
+
+  resetPasswordViaRecovery: async (recoveryCode, newPassword) => {
+    set({ isLoading: true })
+    try {
+      const readResult = await window.vault.readVault()
+      if (!readResult.ok) { set({ isLoading: false }); return false }
+
+      const vaultFile = parseVaultFile(readResult.data)
+      if (!vaultFile.recoverySalt || !vaultFile.recoveryEncryptedMasterKey) {
+        set({ isLoading: false }); return false
+      }
+
+      // Récupère la masterKey via le code de récup
+      const recoverySalt = base64ToUint8(vaultFile.recoverySalt)
+      const recoveryKey = await deriveKey(normalizeCode(recoveryCode), recoverySalt)
+      const oldMasterKey = decryptBytes(vaultFile.recoveryEncryptedMasterKey, recoveryKey)
+      zeroFill(recoveryKey)
+
+      if (!verifyToken(vaultFile.verifyToken, oldMasterKey)) {
+        zeroFill(oldMasterKey); set({ isLoading: false }); return false
+      }
+
+      // Déchiffre les données avec l'ancienne masterKey
+      const vaultData = decryptVaultData(vaultFile.data, oldMasterKey)
+
+      // Crée une nouvelle masterKey depuis le nouveau mot de passe
+      const newSalt = generateSalt()
+      const newKey = await deriveKey(newPassword, newSalt)
+
+      // Re-chiffre le TOTP si présent
+      let newTotpEncrypted = ''
+      if (vaultFile.totpEnabled && vaultFile.totpEncryptedSecret) {
+        const secret = decryptString(vaultFile.totpEncryptedSecret, oldMasterKey)
+        newTotpEncrypted = encryptString(secret, newKey)
+      }
+
+      // Met à jour le recovery avec la nouvelle masterKey
+      const newRecoveryKey = await deriveKey(normalizeCode(recoveryCode), recoverySalt)
+      const newRecoveryEncryptedMasterKey = encryptBytes(newKey, newRecoveryKey)
+      const newRecoveryEncryptedCode = encryptString(recoveryCode, newKey)
+      zeroFill(newRecoveryKey)
+      zeroFill(oldMasterKey)
+
+      const newFile: VaultFile = {
+        ...vaultFile,
+        salt: uint8ToBase64(newSalt),
+        verifyToken: createVerifyToken(newKey),
+        totpEncryptedSecret: newTotpEncrypted,
+        data: encryptVaultData(vaultData, newKey),
+        recoverySalt: uint8ToBase64(recoverySalt),
+        recoveryEncryptedCode: newRecoveryEncryptedCode,
+        recoveryEncryptedMasterKey: newRecoveryEncryptedMasterKey,
+      }
+
+      await persistVaultFile(newFile)
+
+      set({
+        isUnlocked: true,
+        masterKey: newKey,
+        vaultFile: newFile,
+        vaultData,
+        isTOTPEnabled: newFile.totpEnabled,
+        isLoading: false,
+        selection: { projectId: null, categoryId: null, noteId: null },
+      })
+      return true
+    } catch {
+      set({ isLoading: false })
+      return false
+    }
+  },
+
   exportVault: async (exportPassword) => {
     const { vaultData } = get()
     if (!vaultData) return
@@ -346,17 +498,29 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // ── Helpers CRUD ──────────────────────────────────────────────────────────
 
-  createProject: async (name, icon = '📁', color = '#e8820c') => {
+  createProject: async (name, icon = '📁', color = '#e8820c', templateCategories = []) => {
     const { masterKey, vaultFile, vaultData } = get()
     if (!masterKey || !vaultFile || !vaultData) throw new Error('Vault verrouillé')
+
+    const categories: Category[] = templateCategories.map(t => ({
+      id: uuidv4(),
+      projectId: '',  // sera réaffecté ci-dessous
+      name: t.name,
+      icon: t.icon,
+      notes: [],
+      defaultNoteType: t.defaultNoteType,
+    }))
 
     const project: Project = {
       id: uuidv4(),
       name, icon, color,
-      categories: [],
+      categories: categories.map(c => ({ ...c, projectId: '' })),
       createdAt: Date.now(),
       updatedAt: Date.now(),
     }
+    // Affecte le vrai projectId aux catégories
+    project.categories = categories.map(c => ({ ...c, projectId: project.id }))
+
     const newData = { ...vaultData, projects: [...vaultData.projects, project], updatedAt: Date.now() }
     const newFile = await persistVaultData(newData, vaultFile, masterKey)
     set({ vaultData: newData, vaultFile: newFile })
@@ -391,11 +555,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ vaultData: newData, vaultFile: newFile, selection: { projectId: null, categoryId: null, noteId: null } })
   },
 
-  createCategory: async (projectId, name, icon = '📂') => {
+  createCategory: async (projectId, name, icon = '📂', defaultNoteType?) => {
     const { masterKey, vaultFile, vaultData } = get()
     if (!masterKey || !vaultFile || !vaultData) throw new Error('Vault verrouillé')
 
-    const category: Category = { id: uuidv4(), projectId, name, icon, notes: [] }
+    const category: Category = { id: uuidv4(), projectId, name, icon, notes: [], defaultNoteType }
     const newData = {
       ...vaultData,
       projects: vaultData.projects.map(p =>
@@ -408,6 +572,29 @@ export const useAppStore = create<AppState>((set, get) => ({
     const newFile = await persistVaultData(newData, vaultFile, masterKey)
     set({ vaultData: newData, vaultFile: newFile })
     return category
+  },
+
+  updateCategory: async (projectId, categoryId, updates) => {
+    const { masterKey, vaultFile, vaultData } = get()
+    if (!masterKey || !vaultFile || !vaultData) return
+
+    const newData = {
+      ...vaultData,
+      projects: vaultData.projects.map(p =>
+        p.id === projectId
+          ? {
+              ...p,
+              categories: p.categories.map(c =>
+                c.id === categoryId ? { ...c, ...updates } : c
+              ),
+              updatedAt: Date.now(),
+            }
+          : p
+      ),
+      updatedAt: Date.now(),
+    }
+    const newFile = await persistVaultData(newData, vaultFile, masterKey)
+    set({ vaultData: newData, vaultFile: newFile })
   },
 
   deleteCategory: async (projectId, categoryId) => {
@@ -521,6 +708,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setShowSettings: (show) => set({ showSettings: show }),
   setShowTOTPSetup: (show) => set({ showTOTPSetup: show }),
   setLoading: (loading) => set({ isLoading: loading }),
+  clearPendingRecoveryCode: () => set({ pendingRecoveryCode: null }),
 }))
 
 // ─── Sélecteurs dérivés ───────────────────────────────────────────────────────

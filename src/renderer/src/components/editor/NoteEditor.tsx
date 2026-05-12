@@ -1,9 +1,10 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
 import { useAppStore, useSelectedNote, useSelectedCategory, useSelectedProject } from '@/stores/appStore'
 import { useClipboard } from '@/hooks/useClipboard'
 import { RichNoteEditor, RichNotePreview } from '@/components/editor/RichNoteEditor'
+import { ConfirmModal } from '@/components/shared/ConfirmModal'
 import type { NoteType } from '@/types/vault.types'
 import {
   NOTE_TYPE_LABELS, NOTE_TYPE_ICONS, NOTE_TYPE_COLORS,
@@ -113,25 +114,126 @@ function SensitiveValue({ value, label }: { value: string; label: string }) {
   )
 }
 
+// ── Autocomplete pour label/identifiant (email, username) ─────────────────────
+// Suggère les valeurs déjà saisies dans d'autres notes du même type.
+// Ne s'affiche jamais sur les champs de mot de passe.
+function AutocompleteInput({ value, onChange, suggestions, placeholder, className }: {
+  value: string
+  onChange: (v: string) => void
+  suggestions: string[]
+  placeholder?: string
+  className?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [activeIdx, setActiveIdx] = useState(0)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  const filtered = useMemo(() => {
+    const q = value.toLowerCase()
+    return suggestions.filter(s => s.toLowerCase().includes(q) && s !== value)
+  }, [value, suggestions])
+
+  const showDropdown = open && filtered.length > 0
+
+  useEffect(() => { setActiveIdx(0) }, [filtered])
+
+  // Ferme si clic en dehors
+  useEffect(() => {
+    if (!showDropdown) return
+    const handler = (e: MouseEvent) => {
+      if (!containerRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showDropdown])
+
+  const pick = useCallback((s: string) => {
+    onChange(s)
+    setOpen(false)
+  }, [onChange])
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (!showDropdown) return
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIdx(i => Math.min(i + 1, filtered.length - 1)) }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); setActiveIdx(i => Math.max(i - 1, 0)) }
+    if (e.key === 'Enter' && filtered[activeIdx]) { e.preventDefault(); pick(filtered[activeIdx]) }
+    if (e.key === 'Escape') setOpen(false)
+  }, [showDropdown, filtered, activeIdx, pick])
+
+  return (
+    <div ref={containerRef} className="relative">
+      <input
+        type="text"
+        value={value}
+        onChange={e => { onChange(e.target.value); setOpen(true) }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={handleKeyDown}
+        className={className ?? 'input-terminal'}
+        placeholder={placeholder}
+        autoComplete="off"
+        spellCheck={false}
+      />
+      {showDropdown && (
+        <div className="absolute z-20 left-0 right-0 top-full mt-1 bg-vault-surface border border-vault-border rounded-md shadow-lg overflow-hidden">
+          {filtered.map((s, i) => (
+            <button
+              key={s}
+              type="button"
+              onMouseDown={e => { e.preventDefault(); pick(s) }}
+              onMouseEnter={() => setActiveIdx(i)}
+              className={`w-full text-left px-3 py-2 text-xs font-mono transition-colors ${
+                i === activeIdx ? 'bg-vault-muted text-vault-accent' : 'text-vault-text-dim hover:bg-vault-muted/50'
+              }`}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Formulaire création / édition ─────────────────────────────────────────────
 interface NoteFormProps {
   projectId: string
   categoryId: string
   noteId?: string
+  defaultType?: NoteType
   initial?: { title: string; content: string; label: string; notes: string; type: NoteType; tags: string[]; favorite: boolean }
   onSave: () => void
   onCancel: () => void
   onDelete?: () => void
 }
 
-function NoteForm({ projectId, categoryId, noteId, initial, onSave, onCancel, onDelete }: NoteFormProps){
-  const { createNote, updateNote } = useAppStore()
+function NoteForm({ projectId, categoryId, noteId, defaultType, initial, onSave, onCancel, onDelete }: NoteFormProps){
+  const { createNote, updateNote, vaultData } = useAppStore()
+
+  // Types pour lesquels on propose l'autocomplete sur le label (email/identifiant)
+  const LABEL_AUTOCOMPLETE_TYPES: NoteType[] = ['password', 'url', 'api_key']
+
+  // Collecte les labels déjà utilisés dans toutes les notes de types compatibles
+  const labelSuggestions = useMemo<string[]>(() => {
+    if (!vaultData) return []
+    const seen = new Set<string>()
+    vaultData.projects.forEach(p =>
+      p.categories.forEach(c =>
+        c.notes.forEach(n => {
+          if (LABEL_AUTOCOMPLETE_TYPES.includes(n.type) && n.label.trim()) {
+            seen.add(n.label.trim())
+          }
+        })
+      )
+    )
+    return [...seen]
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vaultData])
 
   const [title, setTitle] = useState(initial?.title ?? '')
   const [content, setContent] = useState(initial?.content ?? '')
   const [label, setLabel] = useState(initial?.label ?? '')
   const [notes, setNotes] = useState(initial?.notes ?? '')
-  const [type, setType] = useState<NoteType>(initial?.type ?? 'note')
+  const [type, setType] = useState<NoteType>(initial?.type ?? defaultType ?? 'note')
   const [tagsInput, setTagsInput] = useState((initial?.tags ?? []).join(', '))
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
@@ -225,13 +327,22 @@ function NoteForm({ projectId, categoryId, noteId, initial, onSave, onCancel, on
             <label className="block text-vault-text-dim text-xs mb-1.5">
               {type === 'env_var' ? 'Nom de la variable' : type === 'dependency' ? 'Version' : 'Label / Identifiant'}
             </label>
-            <input
-              type="text"
-              value={label}
-              onChange={e => setLabel(e.target.value)}
-              className="input-terminal"
-              placeholder={NOTE_TYPE_LABEL_PLACEHOLDERS[type]}
-            />
+            {LABEL_AUTOCOMPLETE_TYPES.includes(type) ? (
+              <AutocompleteInput
+                value={label}
+                onChange={setLabel}
+                suggestions={labelSuggestions}
+                placeholder={NOTE_TYPE_LABEL_PLACEHOLDERS[type]}
+              />
+            ) : (
+              <input
+                type="text"
+                value={label}
+                onChange={e => setLabel(e.target.value)}
+                className="input-terminal"
+                placeholder={NOTE_TYPE_LABEL_PLACEHOLDERS[type]}
+              />
+            )}
           </div>
 
           {/* Valeur principale */}
@@ -303,12 +414,23 @@ function NoteList(){
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="px-5 py-3 border-b border-vault-border flex items-center justify-between shrink-0">
-        <div>
-          <div className="text-vault-text-dim text-xs">{project.icon} {project.name}</div>
-          <h2 className="text-vault-text-bright font-semibold text-sm">{category.icon} {category.name}</h2>
+      {/* Breadcrumb — toujours visible */}
+      <div className="px-5 py-2.5 border-b border-vault-border flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-1.5 text-xs min-w-0 flex-1">
+          <span className="shrink-0">{project.icon}</span>
+          <span className="text-vault-text-dim truncate">{project.name}</span>
+          <span className="text-vault-border shrink-0 mx-0.5">/</span>
+          <span className="shrink-0">{category.icon}</span>
+          <span className="text-vault-text-bright font-medium truncate">{category.name}</span>
+          {category.notes.length > 0 && (
+            <span className="text-vault-text-dim/40 shrink-0 ml-1 tabular-nums">
+              ({category.notes.length})
+            </span>
+          )}
         </div>
-        <button onClick={() => setEditingNote('new')} className="btn-primary">+ note</button>
+        <button onClick={() => setEditingNote('new')} className="btn-primary shrink-0 ml-3 py-1.5 px-3 text-xs">
+          + note
+        </button>
       </div>
 
       <div className="flex-1 overflow-y-auto divide-y divide-vault-border">
@@ -365,13 +487,15 @@ export function NoteEditor(){
   const project = useSelectedProject()
   const category = useSelectedCategory()
   const { copy, isCopied } = useClipboard()
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
 
-  // Création d'une nouvelle note
+  // Création d'une nouvelle note — pré-sélectionne le type de la catégorie
   if (editingNoteId === 'new' && selection.projectId && selection.categoryId) {
     return (
       <NoteForm
         projectId={selection.projectId}
         categoryId={selection.categoryId}
+        defaultType={category?.defaultNoteType}
         onSave={() => setEditingNote(null)}
         onCancel={() => setEditingNote(null)}
       />
@@ -381,17 +505,28 @@ export function NoteEditor(){
   // Édition d'une note existante
   if (editingNoteId && selectedNote && selection.projectId && selection.categoryId) {
     return (
-      <NoteForm
-        projectId={selection.projectId}
-        categoryId={selection.categoryId}
-        noteId={selectedNote.id}
-        initial={selectedNote}
-        onSave={() => setEditingNote(null)}
-        onCancel={() => setEditingNote(null)}
-        onDelete={async () => {
-          await deleteNote(selection.projectId!, selection.categoryId!, selectedNote.id)
-        }}
-      />
+      <>
+        <NoteForm
+          projectId={selection.projectId}
+          categoryId={selection.categoryId}
+          noteId={selectedNote.id}
+          initial={selectedNote}
+          onSave={() => setEditingNote(null)}
+          onCancel={() => setEditingNote(null)}
+          onDelete={() => setShowDeleteConfirm(true)}
+        />
+        {showDeleteConfirm && (
+          <ConfirmModal
+            title={`Supprimer « ${selectedNote.title} » ?`}
+            message="Cette note sera définitivement supprimée. Cette action est irréversible."
+            onConfirm={async () => {
+              await deleteNote(selection.projectId!, selection.categoryId!, selectedNote.id)
+              setShowDeleteConfirm(false)
+            }}
+            onCancel={() => setShowDeleteConfirm(false)}
+          />
+        )}
+      </>
     )
   }
 

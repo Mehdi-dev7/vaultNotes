@@ -29,9 +29,14 @@ ipcMain.on('activity:ping', resetAutoLockTimer)
 ipcMain.on('lock:manual', stopAutoLockTimer)  // renderer a verrouillé manuellement
 
 // Permet au renderer de modifier le délai d'auto-lock
+// ms === 0 → "jamais" : stoppe le timer sans le relancer
 ipcMain.on('autolock:setDelay', (_e, ms: number) => {
   autoLockDelay = ms
-  resetAutoLockTimer()
+  if (ms === 0) {
+    stopAutoLockTimer()
+  } else {
+    resetAutoLockTimer()
+  }
 })
 
 // ─── Fenêtre principale ───────────────────────────────────────────────────────

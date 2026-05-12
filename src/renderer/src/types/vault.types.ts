@@ -1,7 +1,6 @@
 // ─── Types de données — VaultNotes ────────────────────────────────────────────
 
-// 6 types de notes, chacun avec un affichage adapté dans l'éditeur
-export type NoteType = 'api_key' | 'password' | 'dependency' | 'env_var' | 'url' | 'note'
+export type NoteType = 'api_key' | 'password' | 'dependency' | 'env_var' | 'url' | 'note' | 'contact'
 
 export interface Note {
   id: string
@@ -20,15 +19,16 @@ export interface Note {
 export interface Category {
   id: string
   projectId: string
-  name: string          // "API Keys", "Mots de passe", "Dépendances"
-  icon: string          // emoji : "🔑", "🔒", "📦"
+  name: string             // "API Keys", "Mots de passe", "Dépendances"
+  icon: string             // emoji : "🔑", "🔒", "📦"
   notes: Note[]
+  defaultNoteType?: NoteType  // type pré-sélectionné à la création d'une note
 }
 
 export interface Project {
   id: string
   name: string          // "FacturNow", "Setup Télétravail", "E-commerce client X"
-  icon: string          // emoji ou nom d'icône
+  icon: string
   color: string         // couleur accent hex : "#e8820c", "#6366f1"
   categories: Category[]
   createdAt: number
@@ -44,11 +44,14 @@ export interface VaultData {
 // ─── Format du fichier .vlt sur le disque ─────────────────────────────────────
 export interface VaultFile {
   version: number
-  salt: string             // base64 — 32 bytes aléatoires (sel Argon2id)
-  verifyToken: string      // base64 — "VAULT_OK" chiffré, vérifie le mot de passe
+  salt: string
+  verifyToken: string
   totpEnabled: boolean
-  totpEncryptedSecret: string  // secret TOTP chiffré avec masterKey (base64)
-  data: string             // JSON chiffré AES-256-GCM (base64)
+  totpEncryptedSecret: string
+  data: string
+  recoverySalt?: string
+  recoveryEncryptedCode?: string
+  recoveryEncryptedMasterKey?: string
 }
 
 // ─── Sélection dans l'arborescence ────────────────────────────────────────────
@@ -66,6 +69,7 @@ export const NOTE_TYPE_LABELS: Record<NoteType, string> = {
   env_var:    'Env Var',
   url:        'URL',
   note:       'Note',
+  contact:    'Contact',
 }
 
 export const NOTE_TYPE_ICONS: Record<NoteType, string> = {
@@ -75,18 +79,19 @@ export const NOTE_TYPE_ICONS: Record<NoteType, string> = {
   env_var:    '⚙️',
   url:        '🔗',
   note:       '📝',
+  contact:    '👤',
 }
 
 export const NOTE_TYPE_COLORS: Record<NoteType, string> = {
-  api_key:    '#ffa502',  // orange
-  password:   '#ff4757',  // rouge
-  dependency: '#a29bfe',  // violet
-  env_var:    '#00cec9',  // teal
-  url:        '#74b9ff',  // bleu
-  note:       '#e8820c',  // orange (accent)
+  api_key:    '#ffa502',
+  password:   '#ff4757',
+  dependency: '#a29bfe',
+  env_var:    '#00cec9',
+  url:        '#74b9ff',
+  note:       '#e8820c',
+  contact:    '#26de81',
 }
 
-// Placeholder du contenu selon le type
 export const NOTE_TYPE_PLACEHOLDERS: Record<NoteType, string> = {
   api_key:    'votre-clé-api-ici...',
   password:   'Mot de passe ou credentials...',
@@ -94,9 +99,9 @@ export const NOTE_TYPE_PLACEHOLDERS: Record<NoteType, string> = {
   env_var:    'valeur de la variable',
   url:        'https://example.com',
   note:       'Contenu de la note...',
+  contact:    'Informations de contact...',
 }
 
-// Placeholder du label selon le type
 export const NOTE_TYPE_LABEL_PLACEHOLDERS: Record<NoteType, string> = {
   api_key:    'STRIPE_SECRET_KEY',
   password:   'username@host',
@@ -104,4 +109,78 @@ export const NOTE_TYPE_LABEL_PLACEHOLDERS: Record<NoteType, string> = {
   env_var:    'DATABASE_URL',
   url:        'Titre ou description',
   note:       '',
+  contact:    'Entreprise / Rôle',
 }
+
+// ─── Templates de création ────────────────────────────────────────────────────
+
+export interface CategoryTemplate {
+  icon: string
+  name: string
+  defaultNoteType: NoteType
+}
+
+export interface ProjectTemplate {
+  icon: string
+  label: string
+  description: string
+  color: string
+  categories: CategoryTemplate[]
+}
+
+export const PROJECT_TEMPLATES: ProjectTemplate[] = [
+  {
+    icon: '📁',
+    label: 'Projet libre',
+    description: 'Projet vierge, tu ajoutes tes catégories',
+    color: '#e8820c',
+    categories: [],
+  },
+  {
+    icon: '💻',
+    label: 'Projet dev',
+    description: 'API keys, env vars, dépendances',
+    color: '#6c63ff',
+    categories: [
+      { icon: '🔑', name: 'API Keys',    defaultNoteType: 'api_key' },
+      { icon: '⚙️', name: 'Env Vars',    defaultNoteType: 'env_var' },
+      { icon: '📦', name: 'Dépendances', defaultNoteType: 'dependency' },
+    ],
+  },
+  {
+    icon: '🔐',
+    label: 'Mots de passe',
+    description: 'Sites web, apps, réseaux sociaux',
+    color: '#ff4757',
+    categories: [
+      { icon: '🌐', name: 'Sites web',       defaultNoteType: 'password' },
+      { icon: '📱', name: 'Applications',    defaultNoteType: 'password' },
+      { icon: '💬', name: 'Réseaux sociaux', defaultNoteType: 'password' },
+    ],
+  },
+  {
+    icon: '👤',
+    label: 'Contacts',
+    description: 'Clients, fournisseurs, partenaires',
+    color: '#26de81',
+    categories: [
+      { icon: '🤝', name: 'Clients',      defaultNoteType: 'contact' },
+      { icon: '📦', name: 'Fournisseurs', defaultNoteType: 'contact' },
+    ],
+  },
+]
+
+export const CATEGORY_TEMPLATES: Array<{
+  icon: string
+  name: string
+  defaultNoteType: NoteType | null
+}> = [
+  { icon: '🔑', name: 'API Keys',      defaultNoteType: 'api_key' },
+  { icon: '🔒', name: 'Mots de passe', defaultNoteType: 'password' },
+  { icon: '🔗', name: 'Liens',         defaultNoteType: 'url' },
+  { icon: '📝', name: 'Notes',         defaultNoteType: 'note' },
+  { icon: '⚙️', name: 'Env Vars',      defaultNoteType: 'env_var' },
+  { icon: '📦', name: 'Dépendances',   defaultNoteType: 'dependency' },
+  { icon: '👤', name: 'Contacts',      defaultNoteType: 'contact' },
+  { icon: '✏️', name: 'Personnalisée', defaultNoteType: null },
+]
