@@ -1,0 +1,35 @@
+name: Security Watch
+
+# Surveillance quotidienne : vulnérabilités, secrets exposés, libs sensibles en retard.
+# Envoie un email d'alerte (URGENT/VIGILANCE/INFO) seulement si un problème est trouvé.
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # tous les jours à 06:00 UTC (≈ 7h/8h heure FR)
+  workflow_dispatch: {} # bouton "Run workflow" pour tester manuellement
+
+jobs:
+  security-watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # Install souple : ne casse pas si le lockfile est légèrement désynchronisé.
+      - run: pnpm install --no-frozen-lockfile --ignore-scripts
+
+      - name: Lancer la surveillance de sécurité
+        run: node scripts/security-watch.mjs
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+          APP_NAME: vaultnotes

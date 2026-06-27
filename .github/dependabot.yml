@@ -1,0 +1,18 @@
+# Dependabot — surveillance native GitHub (gratuit).
+# Complète security-watch.mjs : ouvre automatiquement des PR pour les MAJ de sécurité.
+# (package-ecosystem "npm" couvre aussi pnpm et yarn.)
+
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
