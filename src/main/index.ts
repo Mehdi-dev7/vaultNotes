@@ -2,6 +2,14 @@ import { app, BrowserWindow, Menu, ipcMain } from 'electron'
 import path from 'path'
 import { registerIPCHandlers } from './ipc/handlers'
 
+// ─── Bloquer toute connexion réseau sortante ──────────────────────────────────
+// VaultNotes est 100% local — aucune raison de contacter internet.
+// Ces switches désactivent : crash reporter Crashpad, mises à jour Chromium,
+// télémétrie et "background networking" du moteur Chromium embarqué.
+app.commandLine.appendSwitch('disable-crash-reporter')
+app.commandLine.appendSwitch('disable-component-update')
+app.commandLine.appendSwitch('no-pings')
+
 // ─── Auto-lock ────────────────────────────────────────────────────────────────
 // Le timer tourne dans le main process.
 // Le renderer envoie 'activity:ping' à chaque interaction (throttlé).

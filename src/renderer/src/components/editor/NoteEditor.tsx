@@ -117,9 +117,10 @@ function SensitiveValue({ value, label }: { value: string; label: string }) {
 // ── Autocomplete pour label/identifiant (email, username) ─────────────────────
 // Suggère les valeurs déjà saisies dans d'autres notes du même type.
 // Ne s'affiche jamais sur les champs de mot de passe.
-function AutocompleteInput({ value, onChange, suggestions, placeholder, className }: {
+function AutocompleteInput({ value, onChange, onRemove, suggestions, placeholder, className }: {
   value: string
   onChange: (v: string) => void
+  onRemove?: (s: string) => void
   suggestions: string[]
   placeholder?: string
   className?: string
@@ -176,17 +177,37 @@ function AutocompleteInput({ value, onChange, suggestions, placeholder, classNam
       {showDropdown && (
         <div className="absolute z-20 left-0 right-0 top-full mt-1 bg-vault-surface border border-vault-border rounded-md shadow-lg overflow-hidden">
           {filtered.map((s, i) => (
-            <button
+            <div
               key={s}
-              type="button"
-              onMouseDown={e => { e.preventDefault(); pick(s) }}
               onMouseEnter={() => setActiveIdx(i)}
-              className={`w-full text-left px-3 py-2 text-xs font-mono transition-colors ${
-                i === activeIdx ? 'bg-vault-muted text-vault-accent' : 'text-vault-text-dim hover:bg-vault-muted/50'
+              className={`group flex items-center transition-colors ${
+                i === activeIdx ? 'bg-vault-muted' : 'hover:bg-vault-muted/50'
               }`}
             >
-              {s}
-            </button>
+              {/* Zone de sélection */}
+              <button
+                type="button"
+                onMouseDown={e => { e.preventDefault(); pick(s) }}
+                className={`flex-1 text-left px-3 py-2 text-xs font-mono ${
+                  i === activeIdx ? 'text-vault-accent' : 'text-vault-text-dim'
+                }`}
+              >
+                {s}
+              </button>
+              {/* Bouton supprimer — visible au hover de la ligne */}
+              {onRemove && (
+                <button
+                  type="button"
+                  onMouseDown={e => { e.preventDefault(); e.stopPropagation(); onRemove(s) }}
+                  title="Ne plus suggérer"
+                  className="px-2 py-2 text-vault-text-dim opacity-0 group-hover:opacity-100 hover:text-vault-danger transition-opacity"
+                >
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                    <path d="M1 1l8 8M9 1L1 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                  </svg>
+                </button>
+              )}
+            </div>
           ))}
         </div>
       )}
@@ -212,6 +233,21 @@ function NoteForm({ projectId, categoryId, noteId, defaultType, initial, onSave,
   // Types pour lesquels on propose l'autocomplete sur le label (email/identifiant)
   const LABEL_AUTOCOMPLETE_TYPES: NoteType[] = ['password', 'url', 'api_key']
 
+  // Suggestions ignorées par l'utilisateur (stockées dans localStorage, pas sensible)
+  const DISMISSED_KEY = 'vn_dismissed_label_suggestions'
+  const [dismissed, setDismissed] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem(DISMISSED_KEY) ?? '[]')) }
+    catch { return new Set() }
+  })
+
+  const dismissSuggestion = useCallback((s: string) => {
+    setDismissed(prev => {
+      const next = new Set(prev).add(s)
+      localStorage.setItem(DISMISSED_KEY, JSON.stringify([...next]))
+      return next
+    })
+  }, [])
+
   // Collecte les labels déjà utilisés dans toutes les notes de types compatibles
   const labelSuggestions = useMemo<string[]>(() => {
     if (!vaultData) return []
@@ -225,9 +261,9 @@ function NoteForm({ projectId, categoryId, noteId, defaultType, initial, onSave,
         })
       )
     )
-    return [...seen]
+    return [...seen].filter(s => !dismissed.has(s))
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vaultData])
+  }, [vaultData, dismissed])
 
   const [title, setTitle] = useState(initial?.title ?? '')
   const [content, setContent] = useState(initial?.content ?? '')
@@ -331,6 +367,7 @@ function NoteForm({ projectId, categoryId, noteId, defaultType, initial, onSave,
               <AutocompleteInput
                 value={label}
                 onChange={setLabel}
+                onRemove={dismissSuggestion}
                 suggestions={labelSuggestions}
                 placeholder={NOTE_TYPE_LABEL_PLACEHOLDERS[type]}
               />
