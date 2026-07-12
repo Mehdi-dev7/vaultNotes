@@ -1,11 +1,11 @@
 name: Security Watch
 
-# Surveillance quotidienne : vulnérabilités, secrets exposés, libs sensibles en retard.
+# Surveillance hebdomadaire : vulnérabilités, secrets exposés, libs sensibles en retard.
 # Envoie un email d'alerte (URGENT/VIGILANCE/INFO) seulement si un problème est trouvé.
 
 on:
   schedule:
-    - cron: "0 6 * * *" # tous les jours à 06:00 UTC (≈ 7h/8h heure FR)
+    - cron: "0 6 * * 1" # tous les lundis à 06:00 UTC (≈ 7h/8h heure FR)
   workflow_dispatch: {} # bouton "Run workflow" pour tester manuellement
 
 jobs:
